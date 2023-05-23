@@ -21,6 +21,7 @@ class Builder(private val context: Context) {
     internal var defStyleAttr = R.attr.ttlm_defaultStyle
     internal var typeface: Typeface? = null
     internal var overlay = true
+    internal var gravity: Gravity = Gravity.TOP
     internal var floatingAnimation: Animation? = null
     internal var showDuration: Long = 0
     internal var showArrow = true
@@ -96,6 +97,11 @@ class Builder(private val context: Context) {
         return this
     }
 
+    fun gravity(grav: Gravity): Builder {
+        this.gravity = grav
+        return this
+    }
+
     fun anchor(x: Int, y: Int): Builder {
         this.anchorView = null
         this.point = Point(x, y)
@@ -136,9 +142,6 @@ class Builder(private val context: Context) {
     }
 
     fun create(): Tooltip {
-        if (null == anchorView && null == point) {
-            throw IllegalArgumentException("missing anchor point or anchor view")
-        }
         return Tooltip(context, this)
     }
 }

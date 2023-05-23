@@ -3,6 +3,7 @@ package it.swabbass.android.library.xtooltip
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.graphics.*
 import android.os.Handler
@@ -10,7 +11,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.text.Spannable
 import android.view.*
-import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.AnimationUtils
@@ -45,7 +45,7 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
 
     private var mPopupView: TooltipViewContainer? = null
     private var mText: CharSequence?
-    private var mAnchorPoint: Point
+    private var mAnchorPoint: Point? = null
     private var mShowArrow: Boolean
     private var mPadding: Int = 0
     private var mActivateDelay: Long
@@ -61,6 +61,7 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
     private var mAnimator: ValueAnimator? = null
     private var mShowOverlay: Boolean
     private var mOverlayStyle: Int
+    private var mGravity: Gravity = Gravity.TOP
     private var mActivated = false
     private var mHasAnchorView = false
     private var mFollowAnchor = false
@@ -103,7 +104,7 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
                         mOldLocation = intArrayOf(mNewLocation[0], mNewLocation[1])
                     }
 
-                    if (mOldLocation!![0] != mNewLocation[1] || mOldLocation!![1] != mNewLocation[1]) {
+                    if (mOldLocation!![0] != mNewLocation[0] || mOldLocation!![1] != mNewLocation[1]) {
                         offsetBy(
                             (mNewLocation[0] - mOldLocation!![0]).toFloat(),
                             (mNewLocation[1] - mOldLocation!![1]).toFloat()
@@ -119,6 +120,9 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
     }
 
     init {
+        Timber.uprootAll()
+        Timber.plant(Timber.DebugTree())
+
         val theme = context.theme
             .obtainStyledAttributes(
                 null,
@@ -157,13 +161,14 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
 
         this.mText = builder.text
         this.mActivateDelay = builder.activateDelay
-        this.mAnchorPoint = builder.point!!
+        this.mAnchorPoint = builder.point
         this.mClosePolicy = builder.closePolicy
         this.mMaxWidth = builder.maxWidth
         this.mFloatingAnimation = builder.floatingAnimation
         this.mShowDuration = builder.showDuration
         this.mShowOverlay = builder.overlay
         this.mShowArrow = builder.showArrow && builder.layoutId == null
+        this.mGravity = builder.gravity
 
         builder.anchorView?.let {
             this.mAnchorView = WeakReference(it)
@@ -257,15 +262,20 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
         var curFlags1 = curFlags
         curFlags1 = curFlags1 or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
 
-        curFlags1 = if (mClosePolicy.inside() || mClosePolicy.outside()) {
+        curFlags1 = if (!mClosePolicy.touchInside()) {
             curFlags1 and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
         } else {
             curFlags1 or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         }
 
-        if (!mClosePolicy.consume()) {
-            curFlags1 = curFlags1 or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        // When this is set then we can't ever consume any [MotionEvent]
+        // somehow creating a consume for inside and outside breaks lots of things
+        // No matter what the flags are, it's not possible to have focus inside
+        // and have touch events outside and inside.
+        if (!mClosePolicy.consumeInside() || !mClosePolicy.consumeOutside()) {
+            // curFlags1 = curFlags1 or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
+
         curFlags1 = curFlags1 or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
         curFlags1 = curFlags1 or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
         curFlags1 = curFlags1 or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
@@ -616,12 +626,27 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
         }
     }
 
-    fun show(parent: View, gravity: Gravity, fitToScreen: Boolean = false) {
+    fun showAsDropDown(view: View, xoff: Int = 0, yoff: Int = 0, gravity: Gravity? = Gravity.TOP) {
+        this.mAnchorView = WeakReference(view)
+        this.mHasAnchorView = true
+        this.mFollowAnchor = true
+        this.mAnchorPoint = Point(xoff, yoff)
+        show(view, gravity)
+    }
+
+    fun show(parent: View, gravityOpt: Gravity? = null, fitToScreen: Boolean = false, optPoint: Point? = null) {
+        val gravity = gravityOpt ?: mGravity
+        val point = optPoint ?: mAnchorPoint
+
+        if (null == point) {
+            throw IllegalArgumentException("missing anchor point or anchor view")
+        }
+
         if (isShowing || (mHasAnchorView && mAnchorView?.get() == null)) return
 
         isVisible = false
 
-        val params = createPopupLayoutParams(parent.windowToken)
+        val params = createPopupLayoutParams(parent.applicationWindowToken)
         preparePopup(params, gravity)
 
         val gravities = mGravities.toCollection(ArrayList())
@@ -634,7 +659,7 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
             findPosition(
                 parent,
                 mAnchorView?.get(),
-                mAnchorPoint,
+                mAnchorPoint!!,
                 gravities,
                 params,
                 fitToScreen
@@ -653,6 +678,9 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
             removeListeners(mAnchorView?.get())
             removeCallbacks()
             windowManager.removeView(mPopupView)
+            mCustomTooltipView?.let {
+                (contentView as ViewGroup).removeView(it)
+            }
             Timber.v("dismiss: $mPopupView")
             mPopupView = null
             isShowing = false
@@ -764,15 +792,36 @@ class Tooltip internal constructor(private val context: Context, builder: Builde
             targetView?.getGlobalVisibleRect(r1)
             val containsTouch = r1.contains(event.x.toInt(), event.y.toInt())
 
-            if (mClosePolicy.anywhere()) {
-                hide()
-            } else if (mClosePolicy.inside() && containsTouch) {
-                hide()
-            } else if (mClosePolicy.outside() && !containsTouch) {
-                hide()
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+
+                if (mClosePolicy.touchAnywhere()) {
+                    // hide()
+                } else if (mClosePolicy.touchInside() && containsTouch) {
+                    // hide()
+                } else if (mClosePolicy.touchOutside() && !containsTouch) {
+                    // hide()
+                }
+
+                Timber.v("containsTouch=$containsTouch, consume inside=${mClosePolicy.consumeInside()}, outside=${mClosePolicy.consumeOutside()}")
+                Timber.v("close policy=$mClosePolicy")
+
+                if (containsTouch && mClosePolicy.consumeInside()) {
+                    Timber.w("touch inside and consume inside")
+                    return true
+                } else if (!containsTouch && mClosePolicy.consumeOutside()) {
+                    Timber.w("touch outside and consume outside")
+                    return true
+                }
             }
 
-            return mClosePolicy.consume()
+            Timber.w("don't consume")
+
+            if (context is Activity) {
+                (context as Activity).window.decorView.dispatchTouchEvent(event)
+            }
+
+            return false
+
         }
     }
 
